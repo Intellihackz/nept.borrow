@@ -13,8 +13,8 @@ interface KeplrKey {
 interface KeplrOfflineSigner {
   getAccounts: () => Promise<{ address: string; pubkey: Uint8Array }[]>
   signDirect: (address: string, signDoc: unknown) => Promise<{
-    signed: { bodyBytes: Uint8Array; authInfoBytes: Uint8Array }
-    signature: { signature: string }
+    signed: { bodyBytes: Uint8Array; authInfoBytes: Uint8Array; chainId: string; accountNumber: bigint }
+    signature: { signature: string; pub_key: { type: string; value: string } }
   }>
 }
 
@@ -24,7 +24,7 @@ declare global {
       enable: (chainId: string) => Promise<void>
       getOfflineSigner: (chainId: string) => KeplrOfflineSigner
       getKey: (chainId: string) => Promise<KeplrKey>
-      sendTx: (chainId: string, tx: Uint8Array, mode: number) => Promise<Uint8Array>
+      sendTx: (chainId: string, tx: Uint8Array, mode: string) => Promise<Uint8Array>
     }
   }
 }

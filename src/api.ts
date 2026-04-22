@@ -36,6 +36,8 @@ function parseCollaterals(raw: { data: { contents: RawCollateralItem[] } }): Col
     .filter(c => c.config.enabled)
     .map(c => ({
       id: c.asset_info.asset.id,
+      denom: c.asset_info.asset.group_key,
+      group: c.asset_info.asset.group as 'native' | 'token',
       symbol: c.asset_info.metadata.symbol,
       name: c.asset_info.metadata.name,
       decimals: c.asset_info.metadata.decimals_denom,
@@ -49,6 +51,8 @@ function parseDebts(raw: { data: { contents: RawDebtItem[] } }): BorrowMarket[] 
     .filter(d => d.config.enabled)
     .map(d => ({
       id: d.asset_info.asset.id,
+      denom: d.asset_info.asset.group_key,
+      group: d.asset_info.asset.group as 'native' | 'token',
       symbol: d.asset_info.metadata.symbol,
       name: d.asset_info.metadata.name,
       decimals: d.asset_info.metadata.decimals_denom,

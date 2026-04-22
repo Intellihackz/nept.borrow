@@ -1,6 +1,8 @@
 import { useState, useEffect, useMemo } from 'react'
 import { fetchBorrowMarkets, fetchCollaterals, fetchPrices } from './api'
 import type { BorrowMarket, CollateralAsset, PriceMap, SimResult } from './types'
+import { useWallet } from './wallet'
+import { executeDeposit, executeBorrow } from './tx'
 import './App.css'
 
 // ── Math ──────────────────────────────────────────────────────────────────────
@@ -29,7 +31,6 @@ function computeResult(
       ? (collateralValueUsd * collateral.liquidationLtv) / borrowValueUsd
       : Infinity
 
-  // collateral price at which the position gets liquidated
   const liquidationPrice =
     borrowValueUsd > 0
       ? borrowValueUsd / (collateralAmount * collateral.liquidationLtv)
@@ -175,9 +176,26 @@ function StatRow({
   )
 }
 
+function TxSuccess({ label, hash }: { label: string; hash: string }) {
+  return (
+    <div className="tx-success">
+      <span>✓ {label}</span>
+      <a
+        href={`https://explorer.injective.network/transaction/${hash}`}
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        {hash.slice(0, 14)}… ↗
+      </a>
+    </div>
+  )
+}
+
 // ── App ───────────────────────────────────────────────────────────────────────
 
 export default function App() {
+  const { address, connecting, connect, disconnect } = useWallet()
+
   const [markets, setMarkets] = useState<BorrowMarket[]>([])
   const [collaterals, setCollaterals] = useState<CollateralAsset[]>([])
   const [prices, setPrices] = useState<PriceMap>({})
@@ -188,6 +206,12 @@ export default function App() {
   const [borrowId, setBorrowId] = useState('')
   const [collateralInput, setCollateralInput] = useState('')
   const [borrowInput, setBorrowInput] = useState('')
+
+  const [step, setStep] = useState<'deposit' | 'borrow'>('deposit')
+  const [txPending, setTxPending] = useState(false)
+  const [depositHash, setDepositHash] = useState<string | null>(null)
+  const [borrowHash, setBorrowHash] = useState<string | null>(null)
+  const [txError, setTxError] = useState<string | null>(null)
 
   useEffect(() => {
     Promise.all([fetchBorrowMarkets(), fetchCollaterals(), fetchPrices()])
@@ -215,8 +239,49 @@ export default function App() {
 
   function applyMaxBorrow() {
     if (!result) return
-    // 99% of max to leave a safety margin
     setBorrowInput(fmt(result.maxBorrowAmount * 0.99, 6))
+  }
+
+  const toRaw = (amount: number, decimals: number) =>
+    BigInt(Math.floor(amount * Math.pow(10, decimals))).toString()
+
+  async function handleDeposit() {
+    if (!address || !selectedCollateral) return
+    setTxPending(true)
+    setTxError(null)
+    try {
+      const hash = await executeDeposit({
+        senderAddress: address,
+        collateralDenom: selectedCollateral.denom,
+        collateralGroup: selectedCollateral.group,
+        collateralAmount: toRaw(collateralAmount, selectedCollateral.decimals),
+      })
+      setDepositHash(hash)
+      setStep('borrow')
+    } catch (e) {
+      setTxError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setTxPending(false)
+    }
+  }
+
+  async function handleBorrow() {
+    if (!address || !selectedMarket) return
+    setTxPending(true)
+    setTxError(null)
+    try {
+      const hash = await executeBorrow({
+        senderAddress: address,
+        borrowDenom: selectedMarket.denom,
+        borrowGroup: selectedMarket.group,
+        borrowAmount: toRaw(borrowAmount, selectedMarket.decimals),
+      })
+      setBorrowHash(hash)
+    } catch (e) {
+      setTxError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setTxPending(false)
+    }
   }
 
   const collateralPrice = selectedCollateral ? (prices[selectedCollateral.id] ?? 0) : 0
@@ -227,8 +292,26 @@ export default function App() {
   const hfWarn = !!result && result.healthFactor >= 1.1 && result.healthFactor < 2
   const hfSafe = !!result && result.healthFactor >= 2
 
+  const shortAddress = address ? `${address.slice(0, 8)}…${address.slice(-4)}` : null
+
   return (
     <div className="app">
+      <header className="app-header">
+        <span className="app-logo">nept<span className="app-logo-suffix">.borrow</span></span>
+        <div className="header-wallet">
+          {address ? (
+            <>
+              <span className="wallet-address">{shortAddress}</span>
+              <button className="wallet-btn wallet-btn--connected" onClick={disconnect}>Disconnect</button>
+            </>
+          ) : (
+            <button className="wallet-btn" onClick={connect} disabled={connecting}>
+              {connecting ? 'Connecting…' : 'Connect Keplr'}
+            </button>
+          )}
+        </div>
+      </header>
+
       <main className="sim-main">
         {loading && (
           <div className="loading-state">
@@ -244,175 +327,214 @@ export default function App() {
         )}
 
         {!loading && !error && (
-          <>
-            <div className="page-heading">
-              <h1>Borrow Simulator</h1>
-              <p>What if I borrow X against Y collateral?</p>
-            </div>
-            <div className="sim-grid">
-              {/* ── Inputs ── */}
-              <div className="panel panel-inputs">
-                <section className="input-section">
-                  <h2 className="section-title">
-                    <span className="section-num">1</span> Collateral
-                  </h2>
-                  <AssetSelect
-                    label="Asset"
-                    options={collaterals}
-                    value={collateralId}
-                    onChange={v => { setCollateralId(v); setCollateralInput(''); setBorrowInput('') }}
-                  />
-                  <AmountInput
-                    label="Amount"
-                    value={collateralInput}
-                    onChange={setCollateralInput}
-                    hint={collateralPrice > 0 && collateralAmount > 0 ? fmtUsd(collateralAmount * collateralPrice) : undefined}
-                  />
-                  {selectedCollateral && (
-                    <div className="param-pills">
-                      <span className="pill">Max LTV {fmtPct(selectedCollateral.maxLtv)}</span>
-                      <span className="pill">Liq. at {fmtPct(selectedCollateral.liquidationLtv)}</span>
-                      {collateralPrice > 0 && <span className="pill">{fmtUsd(collateralPrice)} / {selectedCollateral.symbol}</span>}
-                    </div>
-                  )}
-                </section>
-
-                <div className="section-divider" />
-
-                <section className="input-section">
-                  <h2 className="section-title">
-                    <span className="section-num">2</span> Borrow
-                  </h2>
-                  <AssetSelect
-                    label="Asset"
-                    options={markets}
-                    value={borrowId}
-                    onChange={v => { setBorrowId(v); setBorrowInput('') }}
-                  />
-                  <AmountInput
-                    label="Amount"
-                    value={borrowInput}
-                    onChange={setBorrowInput}
-                    hint={borrowPrice > 0 && borrowAmount > 0 ? fmtUsd(borrowAmount * borrowPrice) : undefined}
-                    onMax={result ? applyMaxBorrow : undefined}
-                    maxLabel={result ? `MAX ${fmt(result.maxBorrowAmount * 0.99, 4)} ${selectedMarket?.symbol}` : 'MAX'}
-                  />
-                  {selectedMarket && (
-                    <div className="param-pills">
-                      <span className="pill">APR {fmtPct(selectedMarket.borrowApr)}</span>
-                      <span className="pill">
-                        Avail. {fmtUsd(selectedMarket.availableLiquidity * (borrowPrice || 1))}
-                      </span>
-                      {borrowPrice > 0 && <span className="pill">{fmtUsd(borrowPrice)} / {selectedMarket.symbol}</span>}
-                    </div>
-                  )}
-                </section>
-              </div>
-
-              {/* ── Results ── */}
-              <div className="panel panel-results">
-                {!result || collateralAmount === 0 ? (
-                  <div className="empty-state">
-                    <div className="empty-icon">◈</div>
-                    <p>Enter a collateral amount<br />to see your borrow simulation</p>
+          <div className="sim-grid">
+            {/* ── Inputs ── */}
+            <div className="panel">
+              <section className="input-section">
+                <h2 className="section-title">
+                  <span className="section-num">1</span> Collateral
+                </h2>
+                <AssetSelect
+                  label="Asset"
+                  options={collaterals}
+                  value={collateralId}
+                  onChange={v => {
+                    setCollateralId(v)
+                    setCollateralInput('')
+                    setBorrowInput('')
+                    setStep('deposit')
+                    setDepositHash(null)
+                    setBorrowHash(null)
+                  }}
+                />
+                <AmountInput
+                  label="Amount"
+                  value={collateralInput}
+                  onChange={setCollateralInput}
+                  hint={collateralPrice > 0 && collateralAmount > 0 ? fmtUsd(collateralAmount * collateralPrice) : undefined}
+                />
+                {selectedCollateral && (
+                  <div className="param-pills">
+                    <span className="pill">Max LTV {fmtPct(selectedCollateral.maxLtv)}</span>
+                    <span className="pill">Liq. at {fmtPct(selectedCollateral.liquidationLtv)}</span>
+                    {collateralPrice > 0 && <span className="pill">{fmtUsd(collateralPrice)} / {selectedCollateral.symbol}</span>}
                   </div>
-                ) : (
-                  <>
-                    <h2 className="results-title">Simulation Results</h2>
-
-                    <div className="results-group">
-                      <StatRow
-                        label="Collateral value"
-                        value={fmtUsd(result.collateralValueUsd)}
-                        highlight
-                      />
-                      <StatRow
-                        label="Max you can borrow"
-                        value={`${fmt(result.maxBorrowAmount, 4)} ${selectedMarket?.symbol}`}
-                        sub={fmtUsd(result.maxBorrowUsd)}
-                        highlight
-                      />
-                    </div>
-
-                    {borrowAmount > 0 && (
-                      <>
-                        <div className="results-divider" />
-                        <div className="results-group">
-                          <StatRow
-                            label="Loan-to-Value"
-                            value={fmtPct(result.currentLtv)}
-                            sub={`/ ${fmtPct(result.maxLtv)} max`}
-                            warn={ltvPct > 0.75 && ltvPct <= 0.9}
-                            danger={ltvPct > 0.9}
-                          />
-                          <div className="ltv-track">
-                            <div
-                              className="ltv-fill"
-                              style={{
-                                width: `${Math.min(ltvPct * 100, 100)}%`,
-                                background: ltvPct > 0.9 ? 'var(--red)' : ltvPct > 0.75 ? 'var(--yellow)' : 'var(--accent)',
-                              }}
-                            />
-                          </div>
-
-                          <div className="health-row">
-                            <div className="health-label-row">
-                              <span className="stat-label">Health Factor</span>
-                              <span
-                                className="health-value"
-                                style={{ color: hfDanger ? 'var(--red)' : hfWarn ? 'var(--yellow)' : 'var(--green)' }}
-                              >
-                                {isFinite(result.healthFactor) ? fmt(result.healthFactor, 2) : '∞'}
-                                <span
-                                  className="health-badge"
-                                  style={{
-                                    background: hfDanger ? 'var(--red-bg)' : hfWarn ? 'var(--yellow-bg)' : 'var(--green-bg)',
-                                    color: hfDanger ? 'var(--red)' : hfWarn ? 'var(--yellow)' : 'var(--green)',
-                                  }}
-                                >
-                                  {hfSafe ? 'Safe' : hfWarn ? 'Caution' : 'At Risk'}
-                                </span>
-                              </span>
-                            </div>
-                            <HealthBar value={result.healthFactor} />
-                          </div>
-
-                          {result.liquidationPrice > 0 && (
-                            <StatRow
-                              label={`${selectedCollateral?.symbol} liquidation price`}
-                              value={fmtUsd(result.liquidationPrice)}
-                              sub={`(now ${fmtUsd(collateralPrice)})`}
-                              warn={hfWarn}
-                              danger={hfDanger}
-                            />
-                          )}
-                        </div>
-
-                        <div className="results-divider" />
-                        <div className="results-group">
-                          <p className="group-label">Interest at {fmtPct(result.borrowApr)} APR</p>
-                          <StatRow label="Per year" value={fmtUsd(result.yearlyCostUsd)} />
-                          <StatRow label="Per month" value={fmtUsd(result.monthlyCostUsd)} />
-                          <StatRow label="Per day" value={fmtUsd(result.dailyCostUsd)} />
-                        </div>
-                      </>
-                    )}
-
-                    {borrowAmount === 0 && result.maxBorrowAmount > 0 && (
-                      <div className="cta-hint">
-                        ↑ Enter a borrow amount or tap MAX to see full simulation
-                      </div>
-                    )}
-                  </>
                 )}
-              </div>
+              </section>
+
+              <div className="section-divider" />
+
+              <section className="input-section">
+                <h2 className="section-title">
+                  <span className="section-num">2</span> Borrow
+                </h2>
+                <AssetSelect
+                  label="Asset"
+                  options={markets}
+                  value={borrowId}
+                  onChange={v => { setBorrowId(v); setBorrowInput('') }}
+                />
+                <AmountInput
+                  label="Amount"
+                  value={borrowInput}
+                  onChange={setBorrowInput}
+                  hint={borrowPrice > 0 && borrowAmount > 0 ? fmtUsd(borrowAmount * borrowPrice) : undefined}
+                  onMax={result ? applyMaxBorrow : undefined}
+                  maxLabel={result ? `MAX ${fmt(result.maxBorrowAmount * 0.99, 4)} ${selectedMarket?.symbol}` : 'MAX'}
+                />
+                {selectedMarket && (
+                  <div className="param-pills">
+                    <span className="pill">APR {fmtPct(selectedMarket.borrowApr)}</span>
+                    <span className="pill">
+                      Avail. {fmtUsd(selectedMarket.availableLiquidity * (borrowPrice || 1))}
+                    </span>
+                    {borrowPrice > 0 && <span className="pill">{fmtUsd(borrowPrice)} / {selectedMarket.symbol}</span>}
+                  </div>
+                )}
+              </section>
             </div>
-          </>
+
+            {/* ── Position ── */}
+            <div className="panel panel-results">
+              {!result || collateralAmount === 0 ? (
+                <div className="empty-state">
+                  <div className="empty-icon">◈</div>
+                  <p>Enter a collateral amount<br />to preview your position</p>
+                </div>
+              ) : (
+                <>
+                  <div className="results-group">
+                    <StatRow label="Collateral value" value={fmtUsd(result.collateralValueUsd)} highlight />
+                    <StatRow
+                      label="Max borrow"
+                      value={`${fmt(result.maxBorrowAmount, 4)} ${selectedMarket?.symbol}`}
+                      sub={fmtUsd(result.maxBorrowUsd)}
+                      highlight
+                    />
+                  </div>
+
+                  {borrowAmount > 0 && (
+                    <>
+                      <div className="results-divider" />
+                      <div className="results-group">
+                        <StatRow
+                          label="Loan-to-Value"
+                          value={fmtPct(result.currentLtv)}
+                          sub={`/ ${fmtPct(result.maxLtv)} max`}
+                          warn={ltvPct > 0.75 && ltvPct <= 0.9}
+                          danger={ltvPct > 0.9}
+                        />
+                        <div className="ltv-track">
+                          <div
+                            className="ltv-fill"
+                            style={{
+                              width: `${Math.min(ltvPct * 100, 100)}%`,
+                              background: ltvPct > 0.9 ? 'var(--red)' : ltvPct > 0.75 ? 'var(--yellow)' : 'var(--accent)',
+                            }}
+                          />
+                        </div>
+
+                        <div className="health-row">
+                          <div className="health-label-row">
+                            <span className="stat-label">Health Factor</span>
+                            <span
+                              className="health-value"
+                              style={{ color: hfDanger ? 'var(--red)' : hfWarn ? 'var(--yellow)' : 'var(--green)' }}
+                            >
+                              {isFinite(result.healthFactor) ? fmt(result.healthFactor, 2) : '∞'}
+                              <span
+                                className="health-badge"
+                                style={{
+                                  background: hfDanger ? 'var(--red-bg)' : hfWarn ? 'var(--yellow-bg)' : 'var(--green-bg)',
+                                  color: hfDanger ? 'var(--red)' : hfWarn ? 'var(--yellow)' : 'var(--green)',
+                                }}
+                              >
+                                {hfSafe ? 'Safe' : hfWarn ? 'Caution' : 'At Risk'}
+                              </span>
+                            </span>
+                          </div>
+                          <HealthBar value={result.healthFactor} />
+                        </div>
+
+                        {result.liquidationPrice > 0 && (
+                          <StatRow
+                            label={`${selectedCollateral?.symbol} liq. price`}
+                            value={fmtUsd(result.liquidationPrice)}
+                            sub={`(now ${fmtUsd(collateralPrice)})`}
+                            warn={hfWarn}
+                            danger={hfDanger}
+                          />
+                        )}
+                      </div>
+
+                      <div className="results-divider" />
+                      <div className="results-group">
+                        <p className="group-label">Interest at {fmtPct(result.borrowApr)} APR</p>
+                        <StatRow label="Per year" value={fmtUsd(result.yearlyCostUsd)} />
+                        <StatRow label="Per month" value={fmtUsd(result.monthlyCostUsd)} />
+                        <StatRow label="Per day" value={fmtUsd(result.dailyCostUsd)} />
+                      </div>
+                    </>
+                  )}
+
+                  {borrowAmount === 0 && result.maxBorrowAmount > 0 && (
+                    <div className="cta-hint">Enter a borrow amount or tap MAX</div>
+                  )}
+
+                  {borrowAmount > 0 && (
+                    <div className="borrow-action">
+                      {txError && <p className="tx-error">{txError}</p>}
+
+                      {!address ? (
+                        <button className="borrow-btn borrow-btn--ghost" onClick={connect}>
+                          Connect wallet to continue
+                        </button>
+                      ) : borrowHash ? (
+                        <TxSuccess label="Borrowed" hash={borrowHash} />
+                      ) : (
+                        <>
+                          <div className="step-indicators">
+                            <span className={`step-dot ${depositHash ? 'step-done' : step === 'deposit' ? 'step-active' : ''}`}>1</span>
+                            <span className="step-line" />
+                            <span className={`step-dot ${borrowHash ? 'step-done' : step === 'borrow' ? 'step-active' : ''}`}>2</span>
+                          </div>
+
+                          {step === 'deposit' ? (
+                            <>
+                              <button
+                                className="borrow-btn"
+                                onClick={handleDeposit}
+                                disabled={txPending || collateralAmount <= 0}
+                              >
+                                {txPending ? 'Signing…' : `Deposit ${selectedCollateral?.symbol}`}
+                              </button>
+                              {depositHash && <TxSuccess label="Deposited" hash={depositHash} />}
+                            </>
+                          ) : (
+                            <>
+                              {depositHash && <TxSuccess label="Deposited" hash={depositHash} />}
+                              <button
+                                className="borrow-btn"
+                                onClick={handleBorrow}
+                                disabled={txPending || hfDanger}
+                              >
+                                {txPending ? 'Signing…' : `Borrow ${selectedMarket?.symbol}`}
+                              </button>
+                            </>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
         )}
       </main>
 
       <footer className="app-footer">
-        <p>Simulation only — no wallet required. Rates and prices are live from Neptune.</p>
+        <p>Prices and rates are live from Neptune Finance.</p>
         <a href="https://nept.finance" target="_blank" rel="noopener noreferrer">nept.finance ↗</a>
       </footer>
     </div>

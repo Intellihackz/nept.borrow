@@ -1,5 +1,7 @@
 export interface CollateralAsset {
   id: string          // asset.id — used as price map key
+  denom: string       // asset.group_key — denom for native, contract addr for CW20
+  group: 'native' | 'token'  // determines deposit msg variant
   symbol: string
   name: string
   decimals: number    // decimals_denom
@@ -9,6 +11,8 @@ export interface CollateralAsset {
 
 export interface BorrowMarket {
   id: string          // asset.id — used as price map key
+  denom: string       // asset.group_key — denom for native, contract addr for CW20
+  group: 'native' | 'token'  // determines asset_info variant in borrow msg
   symbol: string
   name: string
   decimals: number
